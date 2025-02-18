@@ -1,0 +1,277 @@
+---
+title: "Prediction Assignment for Practical Machine Learning Course"
+author: "Anthony DiFiore"
+date: "2/18/2025"
+output:
+      html_document:
+            theme: simplex
+            toc: TRUE
+            toc_float: TRUE
+            keep_md: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(corrplot)
+library(ranger)
+library(corrr)
+
+set.seed(7744)
+```
+
+## I. Overview
+
+We're all familiar with the ability of wearable technology to predict what kind of activities the wearer is performing, but we rarely see accurate predictions of how "well" the activity is being performed. In this machine learning prediction analysis, we explore data from a 2013 study, "Qualitative Activity Recognition of Weight Lifting Exercises", in which 6 participants were fitted with wearable sensors, and were instructed to perform unilateral dumbbell biceps curls in five different ways (mapped to the training dataset's `classe` variable):  
+
+* Class A: Exactly according to the specifications (i.e. correct form).  
+* Class B: Throwing the elbows to the front (incorrect form).  
+* Class C: Lifing the dumbbell only halfway (incorrect form).  
+* Class D: Lowering the dumbbel only halfway (incorrect form).  
+* Class E: Throwing the hips to the front (incorrect form).  
+
+Accelerometer readings were recorded and published in the study's publicly-accessible dataset. The goal of this analysis will be to examine the data to see if we can find any correlations between `classe` and the many different accelerometer readings, such that we can create a machine learning model that can accurately predict how well an activity is being performed. Links to the training and testing data can be found here:  
+
+* Training Data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv.  
+* Testing Data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv.  
+
+## II. Preprocessing
+
+We begin by loading and cleaning the data. An initial dimension check of the training set reveals that there are 160 variables. We then proceed to inspect and clean the data, removing columns with missing data:  
+
+```{r}
+training_data <- read.csv(
+  file = "pml-training.csv", 
+  na.strings = c("NA", "", "#DIV/0!")
+)
+
+testing_data <- read.csv(
+  file = "pml-testing.csv",
+  na.strings = c("NA", "", "#DIV/0!")
+)
+
+dim(training_data)
+dim(testing_data)
+```
+
+```{r}
+training_data <- training_data[, colMeans(is.na(training_data)) < 0.95]
+testing_data <- testing_data[,  colMeans(is.na(testing_data)) < 0.95]
+
+cols_to_rm <- c(
+      "X",
+      "user_name",
+      "raw_timestamp_part_1",
+      "raw_timestamp_part_2",
+      "cvtd_timestamp",
+      "new_window",
+      "num_window",
+      "...1"
+)
+training_data <- training_data[, !(names(training_data) %in% cols_to_rm)]
+testing_data  <- testing_data[, !(names(testing_data) %in% cols_to_rm)]
+
+training_data$classe <- as.factor(training_data$classe)
+
+dim(training_data)
+sum(is.na(training_data))
+
+dim(testing_data)
+sum(is.na(testing_data))
+```
+
+After some initial cleaning we were able to reduce the number of variables from 160 to 53.
+
+## III. Exploratory Data Analysis
+
+In this next step, we dig into the data to explore correlations between variables in search of patterns or anomalies, so that we can further slice and refind the data before testing machine learning models. Our goal, as stated earlier, is to understand how the different accelerometer readings (our "features") relate to `classe` (our "outcome").  
+
+```{r fig.width=10, fig.height=8}
+library(lares)
+
+training_data %>% freqs(classe, plot = T, results = F)
+```
+
+The plot above shows the distribution of the `classe` variable, or as we learned eariler, the manner in which the exercise was performed. Class A, which represents correct form, has the highest distribution, with the other four more or less even.
+
+```{r fig.width=10, fig.height=8}
+num_cols <- training_data %>%
+  select(where(is.numeric))
+
+sampled_data <- num_cols %>% sample_n(size = 1962, replace = FALSE)
+
+sampled_data %>%
+      select(where(is.numeric)) %>%
+      correlate() %>%
+      rearrange(absolute = FALSE) %>%
+      shave() ->
+      sampled_cor
+
+p <- rplot(sampled_cor, print_cor = TRUE)
+p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+corr_cross(sampled_data, top = 10)
+```
+
+The two charts above help visualize cross-correlations among variables. This is important because in some cases too many highly correlated features in a dataset--otherwise known as multicollinearity--can create redundancy and interfere with model training. Since we currently have 53 features, and only a small percent seem to be highly correlated, we'll keep all of them and will just steer away from models like Decision Trees, which don't handle a large number of features with potential multicollinearity as well as Random Forests or Gradient Boosting Machines.
+
+## IV. Slicing the Data
+
+Now that we've cleaned the data and selected the features that most relate to the outcome, we're ready to train our prediction models. We begin by slicing the data into a training portion and a validation (testing) portion:  
+
+```{r}
+set.seed(7744)
+data_split <- initial_split(training_data, prop = 3/4, strata = classe)
+tr_set <- training(data_split)
+v_set <- testing(data_split)
+```
+
+## V. Model Training & 5-Fold Repeated Cross-Validation
+
+The first model that we trained is a Random Forest Model, which we set up with 5-fold cross-validation repeated 3 times:
+
+```{r}
+model_recipe <- recipe(classe ~ ., data = tr_set) %>%
+  step_nzv(all_predictors())
+
+rf_spec <- rand_forest(
+  mode = "classification",
+  trees = 500
+) %>%
+set_engine("ranger", importance = "impurity")
+
+rf_workflow <- workflow() %>%
+  add_recipe(model_recipe) %>%
+  add_model(rf_spec)
+
+set.seed(7744)
+rep_cv_split <- vfold_cv(
+  data = tr_set,
+  v = 5,
+  repeats = 3,
+  strata = classe
+)
+
+rf_results <- fit_resamples(
+  rf_workflow,
+  resamples = rep_cv_split,
+  metrics = metric_set(accuracy, roc_auc),
+  control = control_resamples(save_pred = TRUE)
+)
+
+cv_metrics <- rf_results %>% collect_metrics()
+
+final_rf_fit <- fit(rf_workflow, data = tr_set)
+
+valid_preds <- predict(final_rf_fit, v_set, type = "prob") %>%
+  bind_cols(predict(final_rf_fit, v_set)) %>%
+  bind_cols(v_set %>% select(classe))
+
+valid_metrics <- valid_preds %>%
+  metrics(truth = classe, estimate = .pred_class)
+
+cv_metrics
+valid_metrics
+```
+
+### Accuracy and Out-of-Sample Error Rate
+
+```{r}
+cv_accuracy <- cv_metrics %>%
+  filter(.metric == "accuracy") %>%
+  pull(mean)
+
+cv_accuracy
+out_of_sample_error <- 1 - cv_accuracy
+out_of_sample_error
+```
+
+Cross-validation results from the first model show that it achieves 99.22% accuracy on average. Consequently, the out-of-sample error is roughly 0.78%. In other words, when this model is applied to unseen data, it is likely to make an error only around 0.78% of the time. Even though these results are excellent, let's train some additional models to see if we can find even better accuracy.
+
+### Additional Model Training
+
+```{r include=FALSE, message=FALSE, warning=FALSE}
+detach("package:lares")
+library(h2o)
+
+h2o.init()
+
+train_h2o <- as.h2o(tr_set)
+valid_h2o <- as.h2o(v_set)
+test_h2o <- as.h2o(testing_data)
+```
+
+```{r}
+y <- "classe"
+x <- setdiff(names(tr_set), y)
+
+train_h2o[, y] <- as.factor(train_h2o[, y])
+valid_h2o[, y] <- as.factor(valid_h2o[, y])
+
+aml <- h2o.automl(
+      x = x,
+      y = y,
+      training_frame    = train_h2o,
+      leaderboard_frame = valid_h2o,
+      max_runtime_secs  = 300,
+      seed             = 7744
+)
+
+lb <- aml@leaderboard
+lb
+```
+
+Using the `h2o` package, we trained and cross-validated a Gradient Boosting Machine (GBM) model, a Generalized Linear Model (GLM), and a Random Forest (DRF) model in order to create some Stacked Ensemble models, which combine the strengths of multiple base learning models in order to create a single, more robust predictive model. After creating the models shown above, the next step is to rank them and check metrics, so that we can compare the best model's predictive performance against the first model that we created earlier.  
+
+```{r}
+best_model <- aml@leader
+best_model
+```
+
+As you can see from the results of our multinomial stacked ensemble model above, it has slightly outperformed our initial random forest model. The 5-fold cross validation results report an average accuracy of about 99.71%, up from the 99.22% achieved by our first model, and a mean per-class error of just around 0.00325.
+
+The confusion matrix, shown below, compares predicted values to actual values. The results of our stacked ensemble model reveal only 1 misclassification in `classe` label class A, 3 in class B, 4 in class C, and 5 in class D, with class E showing no errors. Overall, the model has achieved almsot perfect classification with an extremely low error rate.
+
+```{r}
+perf <- h2o.performance(best_model, newdata = valid_h2o)
+h2o.confusionMatrix(perf)
+```
+
+## VI. Predictions for 20 Test Cases
+
+```{r}
+final_predictions <- h2o.predict(best_model, test_h2o)
+head(final_predictions, 20)
+```
+
+```{r include=FALSE, message=FALSE, warning=FALSE}
+h2o.shutdown(prompt = FALSE)
+```
+
+## VII. References
+
+1. Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises.
+  Proceedings of 4th Augmented Human (AH) International Conference in cooperation with ACM SIGCHI (Augmented Human'13).
+  Stuttgart, Germany: ACM SIGCHI, 2013.  
+2. Wickham H, Averick M, Bryan J, Chang W, McGowan LD, François R, Grolemund G, Hayes A, Henry L, Hester J, Kuhn M, Pedersen
+  TL, Miller E, Bache SM, Müller K, Ooms J, Robinson D, Seidel DP, Spinu V, Takahashi K, Vaughan D, Wilke C, Woo K, Yutani H
+  (2019). “Welcome to the tidyverse.” _Journal of Open Source Software_, *4*(43), 1686. doi:10.21105/joss.01686
+  <https://doi.org/10.21105/joss.01686>.   
+3. Kuhn et al., (2020). Tidymodels: a collection of packages for modeling and machine learning using tidyverse principles.
+  <https://www.tidymodels.org>.  
+4. Taiyun Wei and Viliam Simko (2024). R package `corrplot`: Visualization of a Correlation Matrix (Version 0.95). Available
+  from <https://github.com/taiyun/corrplot>.  
+5. Marvin N. Wright, Andreas Ziegler (2017). `ranger`: A Fast Implementation of Random Forests for High Dimensional Data in C++
+  and R. Journal of Statistical Software, 77(1), 1-17. doi:10.18637/jss.v077.i01.  
+6. Lares B (2025). _lares: Analytics & Machine Learning Sidekick_. R package version 5.2.11,
+  <https://CRAN.R-project.org/package=lares>.  
+7. Fryda T, LeDell E, Gill N, Aiello S, Fu A, Candel A, Click C, Kraljevic T, Nykodym T, Aboyoun P, Kurka M, Malohlava M,
+  Poirier S, Wong W (2024). _h2o: R Interface for the 'H2O' Scalable Machine Learning Platform_. R package version 3.44.0.3,
+  <https://CRAN.R-project.org/package=h2o>.
+8. R Core Team (2024). R: A language and environment for statistical computing. R Foundation for Statistical Computing, 
+   Vienna, Austria. URL: <https://www.R-project.org/>
+9. Kuhn M, Jackson S, Cimentada J (2022). _corrr: Correlations in R_. R package version 0.4.4,
+  <https://CRAN.R-project.org/package=corrr>.
