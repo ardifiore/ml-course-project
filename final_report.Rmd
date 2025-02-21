@@ -1,7 +1,7 @@
 ---
 title: "Prediction Assignment for Practical Machine Learning Course"
 author: "Anthony DiFiore"
-date: "2/18/2025"
+date: "2025-02-20"
 output:
       html_document:
             theme: simplex
@@ -193,18 +193,17 @@ Cross-validation results from the first model show that it achieves 99.22% accur
 
 ### Additional Model Training
 
-```{r include=FALSE, message=FALSE, warning=FALSE}
+```{r results='hide', message=FALSE, warning=FALSE}
 detach("package:lares")
 library(h2o)
 
 h2o.init()
+```
 
+```{r results='hide', message=FALSE, warning=FALSE}
 train_h2o <- as.h2o(tr_set)
 valid_h2o <- as.h2o(v_set)
 test_h2o <- as.h2o(testing_data)
-```
-
-```{r}
 y <- "classe"
 x <- setdiff(names(tr_set), y)
 
@@ -219,7 +218,9 @@ aml <- h2o.automl(
       max_runtime_secs  = 300,
       seed             = 7744
 )
+```
 
+```{r}
 lb <- aml@leaderboard
 lb
 ```
@@ -233,7 +234,7 @@ best_model
 
 As you can see from the results of our multinomial stacked ensemble model above, it has slightly outperformed our initial random forest model. The 5-fold cross validation results report an average accuracy of about 99.71%, up from the 99.22% achieved by our first model, and a mean per-class error of just around 0.00325.
 
-The confusion matrix, shown below, compares predicted values to actual values. The results of our stacked ensemble model reveal only 1 misclassification in `classe` label class A, 3 in class B, 4 in class C, and 5 in class D, with class E showing no errors. Overall, the model has achieved almsot perfect classification with an extremely low error rate.
+The confusion matrix, shown below, compares predicted values to actual values. The results of our stacked ensemble model reveal only 1 misclassification in `classe` label class A, 4 in class B, 4 in class C, and 5 in class D, with class E showing no errors. Overall, the model has achieved almsot perfect classification with an extremely low error rate.
 
 ```{r}
 perf <- h2o.performance(best_model, newdata = valid_h2o)
@@ -247,7 +248,7 @@ final_predictions <- h2o.predict(best_model, test_h2o)
 head(final_predictions, 20)
 ```
 
-```{r include=FALSE, message=FALSE, warning=FALSE}
+```{r results='hide', message=FALSE, warning=FALSE}
 h2o.shutdown(prompt = FALSE)
 ```
 
